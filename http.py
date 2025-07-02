@@ -53,7 +53,7 @@ class HttpServer:
             self.players[player_id]['score'] = final_score
             self.logger.info(f"Player {player_id} is GAME OVER with final score {final_score}.")
             
-            # Periksa apakah semua pemain yang bermain sudah game over
+            # Cek semua pemain yang bermain sudah game over
             if not any(p.get('state') == 'playing' for p in self.players.values()):
                 self.logger.info("All players are game over. Determining winner.")
                 winner = max(self.players.values(), key=lambda p: p.get('score', 0))
@@ -83,25 +83,37 @@ class HttpServer:
     
     def get_game_state(self, player_id):
         current_time = time.time()
-        # [FIX] Perbarui last_seen di sini agar pemain di lobby tidak timeout
         if player_id in self.players:
             self.players[player_id]['last_seen'] = current_time
-        
-        # Reset game setelah 10 detik menampilkan pemenang
+
         if self.game_state.get('game_over_time') and current_time - self.game_state['game_over_time'] > 10:
             self.reset_game()
-            # Langsung kirim state kosong setelah reset
             return self.create_response({'status': 'OK', 'game_started': False, 'all_players': {}})
+
+        # Cek dan bersihkan pemain yang tidak aktif
+        initial_player_count = len(self.players)
+        active_players = {pid: pdata for pid, pdata in self.players.items() if current_time - pdata.get('last_seen', 0) < 15}
+    
+        if len(active_players) != initial_player_count:
+            self.logger.info(f"Clearing {initial_player_count - len(active_players)} inactive player(s).")
+            self.players = active_players
         
+            # Setelah membersihkan pemain
+            if not self.game_state['game_started'] and len(self.players) >= 2:
+                all_ready = all(p.get('state') == 'ready' for p in self.players.values())
+                if all_ready:
+                    self.game_state['game_started'] = True
+                    for p_id in self.players: self.players[p_id]['state'] = 'playing'
+                    self.logger.info("An inactive player was removed, and now all remaining players are ready. Starting game!")
+
         return self.create_response({
             'status': 'OK',
             'game_started': self.game_state['game_started'],
             'winner': self.game_state.get('winner'),
             'all_players': self.players,
-        })
+    })
     
     def get_stats(self):
-        """[FIX] Fungsi untuk statistik server ditambahkan kembali."""
         return {
             'active_players': len(self.players),
             'total_requests': self.request_count,
