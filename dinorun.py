@@ -11,7 +11,7 @@ import time
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s:%(name)s:%(message)s')
 os.environ['GAME_SERVER'] = 'localhost'
 
-# Inisialisasi Pygame dan konstans
+# Inisialisasi Pygame dan konstanta
 pygame.init()
 WIDTH, HEIGHT = 1000, 600
 screen = pygame.display.set_mode((WIDTH, HEIGHT))

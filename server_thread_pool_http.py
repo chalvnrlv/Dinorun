@@ -3,7 +3,7 @@ import time
 import sys
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from http import HttpServer
+from dinorun_http import HttpServer
 import threading
 
 # Konfigurasi logging
