@@ -74,7 +74,7 @@ def Server():
     """Fungsi utama server."""
     HOST = '0.0.0.0'
     PORT = 55555      # Port dari game dinorun
-    MAX_WORKERS = 50  # Jumlah worker dari game dinorun
+    MAX_WORKERS = 10  # Jumlah worker dari game dinorun
 
     my_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     my_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

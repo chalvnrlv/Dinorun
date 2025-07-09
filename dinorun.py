@@ -1,64 +1,81 @@
+# FILE: dinorun.py
+
 import pygame
 import sys
 import random
-import socket
+import requests  # Menggunakan library requests untuk komunikasi HTTP
 import logging
 import json
 import os
 import time
 
 # Konfigurasi
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s:%(name)s:%(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s:%(name)s:%(message)s')
 os.environ['GAME_SERVER'] = 'localhost'
 
 # Inisialisasi Pygame dan konstanta
 pygame.init()
+pygame.mixer.init()
 WIDTH, HEIGHT = 1000, 600
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Dino Runner - Multiplayer")
+pygame.display.set_caption("Dino Runner - Multiplayer (HTTP)")
 clock = pygame.time.Clock()
 FPS = 30
 WHITE, BLACK, GREEN, BROWN, GRAY, BLUE, ORANGE, RED, GOLD = ((255,255,255), (0,0,0), (34,139,34), (139,69,19), (128,128,128), (135,206,235), (255,165,0), (255,0,0), (255, 215, 0))
 GROUND_HEIGHT = HEIGHT - 100
 GRAVITY, JUMP_STRENGTH, OBSTACLE_SPEED, SPAWN_RATE = 0.8, -15, 8, 120
 
+# --- KELAS CLIENTINTERFACE BARU BERBASIS HTTP ---
 class ClientInterface:
     def __init__(self):
         server_host = os.getenv('GAME_SERVER', 'localhost')
-        self.server_address = (server_host, 55555)
+        self.base_url = f"http://{server_host}:55555"
         self.player_id = None
+        self.logger = logging.getLogger(__name__)
+
+    def _make_request(self, method, endpoint, params=None, data=None):
+        try:
+            if method.upper() == 'GET':
+                response = requests.get(f"{self.base_url}{endpoint}", params=params, timeout=2.0)
+            elif method.upper() == 'POST':
+                response = requests.post(f"{self.base_url}{endpoint}", json=data, timeout=2.0)
+            else:
+                return None
+            
+            response.raise_for_status()  # Cek jika ada error HTTP (4xx atau 5xx)
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            self.logger.warning(f"Request failed: {e}")
+            return None
 
     def register(self):
-        response = self.send_command("register")
+        response = self._make_request('POST', '/register')
         if response and response.get('status') == 'OK':
             self.player_id = response.get('player_id')
             return self.player_id
         return None
 
-    def get_game_state(self): return self.send_command(f"get_game_state {self.player_id}")
-    def update_player_state(self, x, y, is_jumping, is_ducking, score): self.send_command(f"update_player {self.player_id} {x} {y} {is_jumping} {is_ducking} {score}")
-    def set_ready(self): return self.send_command(f"set_ready {self.player_id}")
-    def send_game_over(self, score): return self.send_command(f"game_over {self.player_id} {score}")
+    def get_game_state(self):
+        if not self.player_id: return None
+        return self._make_request('GET', '/gamestate', params={'player_id': self.player_id})
 
-    def send_command(self, command_str=""):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2.0)
-        try:
-            sock.connect(self.server_address)
-            sock.sendall((command_str + '\n').encode())
-            data_received = ""
-            while True:
-                data = sock.recv(4096)
-                if data:
-                    data_received += data.decode('utf-8', errors='ignore')
-                    if "\r\n\r\n" in data_received: break
-                else: break
-            json_part = data_received.split("\r\n\r\n")[0]
-            if json_part: return json.loads(json_part.strip())
-            return None
-        except Exception: return None
-        finally: sock.close()
+    def update_player_state(self, x, y, is_jumping, is_ducking, score):
+        if not self.player_id: return None
+        payload = {
+            'player_id': self.player_id, 'x': x, 'y': y,
+            'is_jumping': is_jumping, 'is_ducking': is_ducking, 'score': score
+        }
+        return self._make_request('POST', '/update', data=payload)
 
+    def set_ready(self):
+        if not self.player_id: return None
+        return self._make_request('POST', '/ready', data={'player_id': self.player_id})
+
+    def send_game_over(self, score):
+        if not self.player_id: return None
+        return self._make_request('POST', '/gameover', data={'player_id': self.player_id, 'score': score})
+
+# --- KELAS-KELAS GAME (TIDAK BERUBAH) ---
 class Obstacle:
     def __init__(self, obstacle_type, x, y):
         self.type, self.x, self.y, self.width, self.height, self.speed = obstacle_type, x, y, 40 if obstacle_type == 'rock' else 60, 40 if obstacle_type == 'rock' else 30, OBSTACLE_SPEED
@@ -104,65 +121,101 @@ class Game:
         self.client = ClientInterface()
         self.local_player, self.remote_players, self.obstacles = None, {}, []
         self.spawn_timer, self.is_ready = 0, False
+        self.logger = logging.getLogger(__name__)
 
     def initialize_connection(self):
-        print("Connecting to server...")
+        self.logger.info("Connecting to server...")
         player_id = self.client.register()
         if player_id:
-            print(f"Successfully connected! You are Player {player_id}.")
+            self.logger.info(f"Successfully connected! You are Player {player_id}.")
             self.local_player = Dinosaur(player_id, self.client, 100)
             return True
-        print("Failed to connect to the server. Exiting."); return False
+        self.logger.error("Failed to connect to the server. Exiting.")
+        return False
 
     def run(self):
-        if not self.initialize_connection(): pygame.quit(); sys.exit()
-        if self.lobby_loop(): self.game_loop()
-        print("Thank you for playing!"); pygame.quit(); sys.exit()
+        try:
+            pygame.mixer.music.load('assets/bg_music.mp3')
+            pygame.mixer.music.set_volume(0.5)
+            pygame.mixer.music.play(loops=-1)
+            self.logger.info("Background music is playing.")
+        except pygame.error as e:
+            self.logger.warning(f"Could not load or play music 'assets/bg_music.mp3': {e}")
+
+        if not self.initialize_connection():
+            pygame.quit()
+            sys.exit()
+        
+        if self.lobby_loop():
+            self.game_loop()
+        
+        self.logger.info("Thank you for playing!")
+        pygame.quit()
+        sys.exit()
 
     def lobby_loop(self):
         self.client.update_player_state(self.local_player.x, self.local_player.y, False, False, 0)
         while True:
             server_state = self.client.get_game_state()
-            if not server_state: print("Connection lost. Exiting."); return False
-            if server_state.get('game_started', False): return True
+            if not server_state:
+                self.logger.error("Connection to server lost. Exiting.")
+                return False
+            
+            if server_state.get('game_started', False):
+                return True
+                
             for event in pygame.event.get():
-                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE): return False
+                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                    return False
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_r and not self.is_ready:
-                    self.client.set_ready(); self.is_ready = True
+                    self.client.set_ready()
+                    self.is_ready = True
+                    
             self.draw_lobby_screen(server_state.get('all_players', {}))
-            pygame.display.flip(); clock.tick(10)
+            pygame.display.flip()
+            clock.tick(10)
     
     def game_loop(self):
         running, local_game_over, sent_game_over = True, False, False
         while running:
             server_state = self.client.get_game_state()
             if not server_state or self.local_player.id not in server_state.get('all_players', {}):
-                print("Game over or disconnected by server."); time.sleep(5); running = False; continue
+                self.logger.info("Game over or disconnected by server.")
+                time.sleep(5)
+                running = False
+                continue
 
             for event in pygame.event.get():
-                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE): running = False
+                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                    running = False
             
             if not local_game_over:
                 self.local_player.update(pygame.key.get_pressed())
-                self.spawn_obstacle(); self.update_obstacles()
-                if self.check_collisions(): local_game_over = True
+                self.spawn_obstacle()
+                self.update_obstacles()
+                if self.check_collisions():
+                    local_game_over = True
             
             if local_game_over and not sent_game_over:
-                self.client.send_game_over(self.local_player.score); sent_game_over = True
+                self.client.send_game_over(self.local_player.score)
+                sent_game_over = True
 
             self.update_remote_players(server_state)
             self.draw_game_elements(local_game_over, server_state)
-            pygame.display.flip(); clock.tick(FPS)
+            pygame.display.flip()
+            clock.tick(FPS)
     
     def draw_game_elements(self, local_game_over, server_state):
         self.draw_background(screen)
         for o in self.obstacles: o.draw(screen)
         self.local_player.draw(screen, local_game_over)
         for pid, player in self.remote_players.items():
-            player_state = server_state.get('all_players', {}).get(pid, {}).get('state')
-            player.draw(screen, player_state == 'game_over')
+            player_data = server_state.get('all_players', {}).get(pid)
+            if player_data:
+                 player.draw(screen, player_data.get('state') == 'game_over')
         self.draw_ui(screen)
-        if server_state.get('winner'): self.draw_winner_screen(server_state['winner'])
+        if server_state.get('winner'):
+            self.draw_winner_screen(server_state['winner'])
         elif local_game_over:
             font = pygame.font.Font(None, 72); text = font.render("GAME OVER", True, BLACK)
             screen.blit(text, (WIDTH//2 - text.get_width()//2, HEIGHT//2 - text.get_height()//2))
@@ -193,23 +246,37 @@ class Game:
             self.obstacles.append(Obstacle(obstacle_type, WIDTH, y))
             self.spawn_timer = random.randint(max(30, 120 - self.local_player.score // 10), SPAWN_RATE)
         else: self.spawn_timer -= 1
+        
     def update_obstacles(self):
-        for o in self.obstacles[:]: o.update();
-        if o.x + o.width < 0: self.obstacles.remove(o)
+        for o in self.obstacles[:]:
+            o.update()
+            if o.x + o.width < 0: self.obstacles.remove(o)
+            
     def check_collisions(self): return any(self.local_player.get_rect().colliderect(o.get_rect()) for o in self.obstacles)
+    
     def update_remote_players(self, server_state):
         if 'all_players' not in server_state: return
         server_players = dict(server_state['all_players'])
         if self.local_player.id in server_players: del server_players[self.local_player.id]
-        current_pids, server_pids = set(self.remote_players.keys()), set(server_players.keys())
+        
+        current_pids = set(self.remote_players.keys())
+        server_pids = set(server_players.keys())
+        
         for pid in current_pids - server_pids: del self.remote_players[pid]
+            
         for pid, pdata in server_players.items():
-            if pid not in self.remote_players: self.remote_players[pid] = Dinosaur(pid, self.client, 100, True)
+            if pid not in self.remote_players:
+                self.remote_players[pid] = Dinosaur(pid, self.client, 100, True)
             self.remote_players[pid].set_state_from_server(pdata)
+            
     def draw_background(self, surface):
-        surface.fill(BLUE); pygame.draw.rect(surface, GREEN, (0, GROUND_HEIGHT, WIDTH, HEIGHT - GROUND_HEIGHT)); pygame.draw.line(surface, BLACK, (0, GROUND_HEIGHT), (WIDTH, GROUND_HEIGHT), 3)
+        surface.fill(BLUE)
+        pygame.draw.rect(surface, GREEN, (0, GROUND_HEIGHT, WIDTH, HEIGHT - GROUND_HEIGHT))
+        pygame.draw.line(surface, BLACK, (0, GROUND_HEIGHT), (WIDTH, GROUND_HEIGHT), 3)
+        
     def draw_ui(self, surface):
-        font = pygame.font.Font(None, 36); score_text = font.render(f"Score: {self.local_player.score}", True, BLACK)
+        font = pygame.font.Font(None, 36)
+        score_text = font.render(f"Score: {self.local_player.score}", True, BLACK)
         surface.blit(score_text, (10, 10))
 
 if __name__ == "__main__":
